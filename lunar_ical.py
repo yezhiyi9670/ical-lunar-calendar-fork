@@ -23,7 +23,7 @@ import sqlite3
 import sys
 import urllib.request
 import zlib
-from lunarcalbase import cn_lunarcal
+from lunarcalbase import cn_lunarcal, CN_MON, CN_MON_TRAD, CN_SOLARTERM, CN_SOLARTERM_TRAD
 
 APPDIR = os.path.abspath(os.path.dirname(__file__))
 DB_FILE = os.path.join(APPDIR, 'db', 'lunarcal.sqlite')
@@ -32,6 +32,7 @@ RE_CAL = re.compile('(\d{4})年(\d{1,2})月(\d{1,2})日')
 PROXY = None
 URL = 'https://www.hko.gov.hk/tc/gts/time/calendar/text/files/T%dc.txt'
 OUTPUT = os.path.join(APPDIR, 'chinese_lunar_%s_%s.ics')
+OUTPUT_REDUCED = os.path.join(APPDIR, 'chinese_lunar_reduced_%s_%s.ics')
 OUTPUT_JIEQI = os.path.join(APPDIR, 'jieqi_tch_%s_%s.ics')
 
 ICAL_HEAD = ('BEGIN:VCALENDAR\n'
@@ -54,20 +55,20 @@ ICAL_SEC = ('BEGIN:VEVENT\n'
 
 ICAL_END = 'END:VCALENDAR'
 
-CN_DAY = {'初二': 2, '初三': 3, '初四': 4, '初五': 5, '初六': 6,
+CN_DAY_INV = {'初二': 2, '初三': 3, '初四': 4, '初五': 5, '初六': 6,
           '初七': 7, '初八': 8, '初九': 9, '初十': 10, '十一': 11,
           '十二': 12, '十三': 13, '十四': 14, '十五': 15, '十六': 16,
           '十七': 17, '十八': 18, '十九': 19, '二十': 20, '廿一': 21,
           '廿二': 22, '廿三': 23, '廿四': 24, '廿五': 25, '廿六': 26,
           '廿七': 27, '廿八': 28, '廿九': 29, '三十': 30}
 
-CN_MON = {'正月': 1, '二月': 2, '三月': 3, '四月': 4,
+CN_MON_INV = {'正月': 1, '二月': 2, '三月': 3, '四月': 4,
           '五月': 5, '六月': 6, '七月': 7, '八月': 8,
           '九月': 9, '十月': 10, '十一月': 11, '十二月': 12,
 
-          '閏正月': 101, '閏二月': 102, '閏三月': 103, '閏四月': 104,
-          '閏五月': 105, '閏六月': 106, '閏七月': 107, '閏八月': 108,
-          '閏九月': 109, '閏十月': 110, '閏十一月': 111, '閏十二月': 112}
+          '闰正月': 101, '闰二月': 102, '闰三月': 103, '闰四月': 104,
+          '闰五月': 105, '闰六月': 106, '闰七月': 107, '闰八月': 108,
+          '闰九月': 109, '闰十月': 110, '闰十一月': 111, '闰十二月': 112}
 
 GAN = ('庚', '辛', '壬', '癸', '甲', '乙', '丙', '丁', '戊', '己')
 ZHI = ('申', '酉', '戌', '亥', '子', '丑',
@@ -124,7 +125,7 @@ def parse_hko(pageurl):
     print('grabbing and parsing %s' % pageurl)
     with urllib.request.urlopen(pageurl) as f:
         html = f.read()
-        lines = html.decode('big5').split('\n')
+        lines = html.decode('utf-8').split('\n')
 
     sql_nojq = ('insert or replace into ical (date,lunardate) '
                 'values(?,?) ')
@@ -146,8 +147,13 @@ def parse_hko(pageurl):
             else:
                 str_d = m.group(3)
 
+            for id in CN_MON_TRAD:
+                fds[1] = fds[1].replace(CN_MON_TRAD[id], CN_MON[id])
+
             dt = '%s-%s-%s' % (m.group(1), str_m, str_d)
             if len(fds) > 3:  # last field is jieqi
+                for id in CN_SOLARTERM_TRAD:
+                    fds[3] = fds[3].replace(CN_SOLARTERM_TRAD[id], CN_SOLARTERM[id])
                 db.execute(sql_jq, (dt, fds[1], fds[3]))
             else:
                 db.execute(sql_nojq, (dt, fds[1]))
@@ -181,6 +187,7 @@ def gen_cal(start, end, fp):
         print('compute Lunar Calendar by astronomical algorithm ')
         rows = []
         for year in range(startyear, endyear + 1):
+            print(year)
             row = cn_lunarcal(year)
             rows.extend(row)
 
@@ -189,7 +196,7 @@ def gen_cal(start, end, fp):
     for r in rows:
         dt = datetime.strptime(r['date'], '%Y-%m-%d')
 
-        if r['lunardate'] in list(CN_MON.keys()):
+        if r['lunardate'] in list(CN_MON_INV.keys()):
             ld = ['%s%s' % (lunaryear(r['date']), r['lunardate'])]
         else:
             ld = [r['lunardate']]
@@ -209,6 +216,61 @@ def gen_cal(start, end, fp):
     outputf.close()
     print('iCal lunar calendar from %s to %s saved to %s' % (start, end, fp))
 
+
+def gen_cal_reduced(start, end, fp):
+    ''' generate lunar calendar in iCalendar format.
+    Args:
+        start and end date in ISO format, like 2010-12-31
+        fp: path to output file
+    Return:
+        none
+        '''
+    startyear = int(start[:4])
+    endyear = int(end[:4])
+    if startyear > 1900 and endyear < 2101:
+        # use Lunar Calendar from HKO
+        print('use Lunar Calendar from HKO')
+        sql = ('select date, lunardate, holiday, jieqi from ical '
+               'where date>=? and date<=? order by date')
+        rows = query_db(sql, (start, end))
+    else:
+        # compute Lunar Calendar by astronomical algorithm
+        print('compute Lunar Calendar by astronomical algorithm ')
+        rows = []
+        for year in range(startyear, endyear + 1):
+            print(year)
+            row = cn_lunarcal(year)
+            rows.extend(row)
+
+    lines = [ICAL_HEAD]
+    oneday = timedelta(days=1)
+    for r in rows:
+        if not r['holiday'] and not r['jieqi'] and ('月' not in r['lunardate']) and (r['lunardate'] not in [
+            '初八', '十五', '廿三'
+        ]):
+            continue
+
+        dt = datetime.strptime(r['date'], '%Y-%m-%d')
+
+        if r['lunardate'] in list(CN_MON_INV.keys()):
+            ld = ['%s%s' % (lunaryear(r['date']), r['lunardate'])]
+        else:
+            ld = [r['lunardate']]
+        if r['holiday']:
+            ld.append(r['holiday'])
+        if r['jieqi']:
+            ld.append(r['jieqi'])
+        uid = '%s-lc@infinet.github.io' % r['date']
+        summary = ' '.join(ld)
+        utcstamp = datetime.utcnow().strftime('%Y%m%dT%H%M%SZ')
+        line = ICAL_SEC % (utcstamp, uid, dt.strftime('%Y%m%d'),
+                       (dt + oneday).strftime('%Y%m%d'), summary)
+        lines.append(line)
+    lines.append(ICAL_END)
+    outputf = open(fp, 'w')
+    outputf.write('\n'.join(lines))
+    outputf.close()
+    print('iCal lunar calendar from %s to %s saved to %s' % (start, end, fp))
 
 def gen_cal_jieqi_only(start, end, fp):
     ''' generate Jieqi and Traditional Chinese in iCalendar format.
@@ -291,10 +353,10 @@ def update_holiday():
     previd = None
     for r in rows:
         try:
-            d = CN_DAY[r['lunardate']]
+            d = CN_DAY_INV[r['lunardate']]
         except KeyError:
             #print 'debug: %s %s' % (r['date'], r['lunardate'])
-            m = CN_MON[r['lunardate']]
+            m = CN_MON_INV[r['lunardate']]
             d = 1
 
         if not m:
@@ -369,18 +431,21 @@ def main():
 '\tlunar_ical.py --start=2013-10-31 --end=2015-12-31\n'
 'Or to generate Jieqi only:\n'
 '\tlunar_ical.py --start=2013-10-31 --end=2015-12-31 --jieqi\n'
+'Or to generate with reduced entries:\n'
+'\tlunar_ical.py --start=2000-01-01 --end=2038-01-19 --reduced\n'
 'Or,\n'
 '\tlunar_ical.py without option will generate the calendar from previous year '
 'to the end of the next year')
 
     try:
         opts, args = getopt.getopt(sys.argv[1:], 'h',
-                                   ['start=', 'end=', 'help', 'jieqi'])
+                                   ['start=', 'end=', 'help', 'jieqi', 'reduced'])
     except getopt.GetoptError as err:
         print(str(err))
         print(helpmsg)
         sys.exit(2)
     jieqionly = False
+    reduced = False
     for o, v in opts:
         if o == '--start':
             start = v
@@ -388,6 +453,8 @@ def main():
             end = v
         elif o == '--jieqi':
             jieqionly = True
+        elif o == '--reduced':
+            reduced = True
         elif 'h' in o:
             sys.exit(helpmsg)
 
@@ -408,6 +475,13 @@ def main():
             fp = OUTPUT_JIEQI % (start, end)
 
         gen_cal_jieqi_only(start, end, fp)
+    elif reduced:
+        if len(sys.argv) == 1:
+            fp = OUTPUT_REDUCED % ('prev_year', 'next_year')
+        else:
+            fp = OUTPUT_REDUCED % (start, end)
+
+        gen_cal_reduced(start, end, fp)
     else:
         if len(sys.argv) == 1:
             fp = OUTPUT % ('prev_year', 'next_year')
